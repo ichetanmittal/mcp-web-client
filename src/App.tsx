@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from 'react';
-import { io, Socket } from 'socket.io-client';
 import './App.css';
 
 interface Message {
@@ -8,8 +7,10 @@ interface Message {
   toolCalls?: any[];
 }
 
+const API_BASE = import.meta.env.PROD ? '/api' : 'http://localhost:3001/api';
+const SESSION_ID = Math.random().toString(36).substring(7);
+
 function App() {
-  const [socket, setSocket] = useState<Socket | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isConnected, setIsConnected] = useState(false);
@@ -18,76 +19,70 @@ function App() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const newSocket = io('http://localhost:3001');
+    // Check server health and get tools
+    fetch(`${API_BASE}/health`)
+      .then(res => res.json())
+      .then(data => {
+        setIsConnected(data.connected);
+        setMessages([{ role: 'system', content: `✓ Connected to MCP server: ${data.mcpServer}` }]);
+      })
+      .catch(() => {
+        setMessages([{ role: 'system', content: '✗ Failed to connect to server' }]);
+      });
 
-    newSocket.on('connect', () => {
-      setIsConnected(true);
-      setMessages((prev) => [
-        ...prev,
-        { role: 'system', content: '✓ Connected to MCP server' },
-      ]);
-      newSocket.emit('get-tools');
-    });
-
-    newSocket.on('disconnect', () => {
-      setIsConnected(false);
-      setMessages((prev) => [
-        ...prev,
-        { role: 'system', content: '✗ Disconnected from server' },
-      ]);
-    });
-
-    newSocket.on('tools', (toolsList: any[]) => {
-      setTools(toolsList);
-    });
-
-    newSocket.on('user-message', (data: { message: string }) => {
-      setMessages((prev) => [...prev, { role: 'user', content: data.message }]);
-    });
-
-    newSocket.on('assistant-message', (data: { message: string; toolCalls: any[] }) => {
-      setMessages((prev) => [
-        ...prev,
-        { role: 'assistant', content: data.message, toolCalls: data.toolCalls },
-      ]);
-      setIsLoading(false);
-    });
-
-    newSocket.on('error', (data: { message: string }) => {
-      setMessages((prev) => [
-        ...prev,
-        { role: 'system', content: `Error: ${data.message}` },
-      ]);
-      setIsLoading(false);
-    });
-
-    newSocket.on('cleared', () => {
-      setMessages([{ role: 'system', content: '✓ Conversation cleared' }]);
-    });
-
-    setSocket(newSocket);
-
-    return () => {
-      newSocket.close();
-    };
+    fetch(`${API_BASE}/tools`)
+      .then(res => res.json())
+      .then(data => setTools(data.tools || []))
+      .catch(console.error);
   }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const sendMessage = (e: React.FormEvent) => {
+  const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || !socket || !isConnected) return;
+    if (!input.trim() || !isConnected) return;
 
-    setIsLoading(true);
-    socket.emit('message', { message: input });
+    const userMessage = input;
     setInput('');
+    setMessages(prev => [...prev, { role: 'user', content: userMessage }]);
+    setIsLoading(true);
+
+    try {
+      const response = await fetch(`${API_BASE}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: userMessage, sessionId: SESSION_ID })
+      });
+
+      const data = await response.json();
+
+      if (data.error) {
+        setMessages(prev => [...prev, { role: 'system', content: `Error: ${data.error}` }]);
+      } else {
+        setMessages(prev => [
+          ...prev,
+          { role: 'assistant', content: data.message, toolCalls: data.toolCalls }
+        ]);
+      }
+    } catch (error: any) {
+      setMessages(prev => [...prev, { role: 'system', content: `Error: ${error.message}` }]);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const clearConversation = () => {
-    if (socket) {
-      socket.emit('clear');
+  const clearConversation = async () => {
+    try {
+      await fetch(`${API_BASE}/clear`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: SESSION_ID })
+      });
+      setMessages([{ role: 'system', content: '✓ Conversation cleared' }]);
+    } catch (error) {
+      console.error('Failed to clear conversation:', error);
     }
   };
 
